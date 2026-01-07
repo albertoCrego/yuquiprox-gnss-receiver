@@ -1,0 +1,12 @@
+version: '3'
+services:
+  gnss-receiver:
+    build: .
+    container_name: gnss-receiver
+    ports:
+      - "8000:8000"
+    environment:
+      - GNSS_HOST=192.168.68.68
+      - GNSS_PORT=27
+      - PROMETHEUS_PORT=8000
+    restart: unless-stopped
