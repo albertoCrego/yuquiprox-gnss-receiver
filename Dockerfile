@@ -7,9 +7,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY gnss-reader.py .
 
-ENV GNSS_HOST=192.168.68.73
-ENV GNSS_PORT=27
-ENV PROMETHEUS_PORT=8000
 
 EXPOSE 8000
 

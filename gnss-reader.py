@@ -7,14 +7,16 @@ Reads NMEA sentences from UM980 receiver and exports metrics to Prometheus
 import socket
 import time
 import threading
+import math
 from datetime import datetime
 from prometheus_client import start_http_server, Gauge, Counter, Info
 import pynmea2
 
 # Configuration
-GNSS_HOST = "192.168.68.73"
-GNSS_PORT = 27
-PROMETHEUS_PORT = 8000
+import os
+GNSS_HOST = os.environ.get("GNSS_HOST", "192.168.68.68")
+GNSS_PORT = int(os.environ.get("GNSS_PORT", 27))
+PROMETHEUS_PORT = int(os.environ.get("PROMETHEUS_PORT", 8000))
 
 # Prometheus Metrics
 # Position metrics
@@ -25,13 +27,27 @@ altitude = Gauge('gnss_altitude_meters', 'Altitude above mean sea level in meter
 # Quality metrics
 fix_quality = Gauge('gnss_fix_quality', 'GPS fix quality (0=invalid, 1=GPS fix, 2=DGPS fix, etc.)')
 hdop = Gauge('gnss_hdop', 'Horizontal Dilution of Precision')
+pdop = Gauge('gnss_pdop', 'Position Dilution of Precision')
+vdop = Gauge('gnss_vdop', 'Vertical Dilution of Precision')
 satellites_used = Gauge('gnss_satellites_used', 'Number of satellites used in solution')
 satellites_visible = Gauge('gnss_satellites_visible', 'Number of satellites visible', ['constellation'])
+
+# Base station specific metrics
+station_position_error_m = Gauge('gnss_station_position_error_meters', 'Position error from reference in meters')
+station_position_variance_lat = Gauge('gnss_station_position_variance_lat_meters', 'Latitude variance from reference (meters)')
+station_position_variance_lon = Gauge('gnss_station_position_variance_lon_meters', 'Longitude variance from reference (meters)')
+station_position_variance_alt = Gauge('gnss_station_position_variance_alt_meters', 'Altitude variance from reference (meters)')
+station_fix_loss_count = Counter('gnss_station_fix_loss_count_total', 'Total number of fix losses')
+station_time_since_last_move = Gauge('gnss_station_time_since_last_position_change_seconds', 'Seconds since last position change')
 
 # Satellite individual metrics
 satellite_elevation = Gauge('gnss_satellite_elevation_degrees', 'Satellite elevation above horizon', ['satellite_id', 'constellation'])
 satellite_azimuth = Gauge('gnss_satellite_azimuth_degrees', 'Satellite azimuth direction', ['satellite_id', 'constellation'])
 satellite_snr = Gauge('gnss_satellite_snr_db', 'Satellite signal-to-noise ratio in dB', ['satellite_id', 'constellation'])
+
+# Satellite polar coordinates (for map visualization)
+satellite_x = Gauge('gnss_satellite_x', 'Satellite X position (polar projection)', ['satellite_id', 'constellation'])
+satellite_y = Gauge('gnss_satellite_y', 'Satellite Y position (polar projection)', ['satellite_id', 'constellation'])
 
 # Accuracy metrics (from GNGST)
 position_error_lat = Gauge('gnss_position_error_lat_meters', 'Latitude position error in meters')
@@ -63,6 +79,12 @@ class GNSSReader:
         self.socket = None
         self.running = False
         self.buffer = ""
+        # Base station reference position
+        self.reference_position = None  # Will be set on first fix
+        self.last_position = None
+        self.last_position_time = None
+        self.last_fix_quality = 0
+        self.position_samples = []  # For variance calculation
         
     def connect(self):
         """Establish connection to GNSS receiver"""
@@ -190,6 +212,22 @@ class GNSSReader:
                                         satellite_id=sat_id_str, 
                                         constellation=constellation
                                     ).set(snr_val)
+                                
+                                # Calculate polar coordinates for map visualization
+                                elev_rad = math.radians(elev_val)
+                                azim_rad = math.radians(azim_val)
+                                r = 1  # Fixed radius for projection
+                                x = r * math.cos(azim_rad) * math.sin(elev_rad)
+                                y = r * math.sin(azim_rad) * math.sin(elev_rad)
+                                
+                                satellite_x.labels(
+                                    satellite_id=sat_id_str,
+                                    constellation=constellation
+                                ).set(x)
+                                satellite_y.labels(
+                                    satellite_id=sat_id_str,
+                                    constellation=constellation
+                                ).set(y)
                             except ValueError:
                                 pass  # Skip invalid numeric values
                 
@@ -239,10 +277,51 @@ class GNSSReader:
                 if msg.latitude and msg.longitude:
                     latitude.set(msg.latitude)
                     longitude.set(msg.longitude)
+                    
+                    # Base station monitoring
+                    current_position = (msg.latitude, msg.longitude, msg.altitude if msg.altitude else 0)
+                    
+                    # Set reference position on first valid fix
+                    if self.reference_position is None and msg.gps_qual and int(msg.gps_qual) >= 1:
+                        self.reference_position = current_position
+                        print(f"✓ Base station reference position set: {current_position}")
+                    
+                    # Monitor position variance
+                    if self.reference_position:
+                        lat_error_m = (msg.latitude - self.reference_position[0]) * 111000  # ~111km per degree
+                        lon_error_m = (msg.longitude - self.reference_position[1]) * 111000 * math.cos(math.radians(msg.latitude))
+                        alt_error_m = (msg.altitude if msg.altitude else 0) - self.reference_position[2]
+                        
+                        station_position_variance_lat.set(lat_error_m)
+                        station_position_variance_lon.set(lon_error_m)
+                        station_position_variance_alt.set(alt_error_m)
+                        
+                        # Total position error in meters
+                        total_error = math.sqrt(lat_error_m**2 + lon_error_m**2 + alt_error_m**2)
+                        station_position_error_m.set(total_error)
+                        
+                        # Track time since last movement
+                        if self.last_position != current_position:
+                            self.last_position = current_position
+                            self.last_position_time = time.time()
+                        elif self.last_position_time:
+                            time_since_move = time.time() - self.last_position_time
+                            station_time_since_last_move.set(time_since_move)
+                
                 if msg.altitude is not None:
                     altitude.set(msg.altitude)
                 if msg.gps_qual is not None:
-                    fix_quality.set(int(msg.gps_qual))
+                    fix_quality_val = int(msg.gps_qual)
+                    fix_quality.set(fix_quality_val)
+                    
+                    # Detect fix loss
+                    if self.last_fix_quality >= 1 and fix_quality_val == 0:
+                        station_fix_loss_count.inc()
+                        print(f"✗ Fix lost at {datetime.now().isoformat()}")
+                    elif self.last_fix_quality == 0 and fix_quality_val >= 1:
+                        print(f"✓ Fix recovered at {datetime.now().isoformat()}")
+                    self.last_fix_quality = fix_quality_val
+                
                 if msg.num_sats is not None:
                     satellites_used.set(int(msg.num_sats))
                 if msg.horizontal_dil is not None:
@@ -257,6 +336,15 @@ class GNSSReader:
                                     msg.sv_id09, msg.sv_id10, msg.sv_id11, msg.sv_id12] if s]
                 if sats:
                     satellites_used.set(len(sats))
+                
+                # Extract DOP values
+                if msg.pdop is not None:
+                    pdop.set(float(msg.pdop))
+                if msg.hdop is not None:
+                    hdop.set(float(msg.hdop))
+                if msg.vdop is not None:
+                    vdop.set(float(msg.vdop))
+                
                 last_update.set(time.time())
                 
         except pynmea2.ParseError as e:
