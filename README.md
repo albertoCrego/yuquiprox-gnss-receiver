@@ -42,6 +42,8 @@ References:
 2. Connect the receiver to the PC (USB).
 3. Open UPrecise, select the COM port and `115200` (or AUTO), then connect.
 
+![UPrecise (UM980) configuration screenshot](grafana/uprecise.png)
+
 ### 2) Enable NMEA output on the port you will use
 
 This exporter expects to receive NMEA sentences like:
