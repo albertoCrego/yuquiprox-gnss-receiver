@@ -137,6 +137,7 @@ References:
 
 - https://simeononsecurity.com/guides/budget-diy-gps-gnss-base-station-setup-esp32-um980/
 - https://www.youtube.com/watch?v=KGQ1xdwAq1A
+- https://www.ardusimple.es/new-tripleband-rtk-receivers-unicore-um980-um981-um982/
 
 Typical wiring (conceptually):
 
