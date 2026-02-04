@@ -1,0 +1,13 @@
+scrape_configs:
+  # The job name is added as a label `job=<job_name>` to any timeseries scraped from this config.
+  - job_name: "gnss-um980"
+
+    # metrics_path defaults to '/metrics'
+    # scheme defaults to 'http'.
+    scrape_interval: 15s
+    scrape_timeout: 5s 
+    static_configs:
+      - targets: ["192.168.68.68:8000"]
+        # The label name is added as a label `label_name=<label_value>` to any timeseries scraped from this config.
+        labels:
+          receiver: "um980"
